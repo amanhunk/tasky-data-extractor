@@ -1,1 +1,0 @@
-# tasky-data-extractor
