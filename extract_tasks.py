@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
-MAX_TASKS = 100  # limit to 100 tasks
+MAX_TASKS = 10   # ← changed from 100 to 10
 
 if not SHEET_URL or not TASK_LIST_URL:
     raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
@@ -65,11 +65,9 @@ class TaskyScraper:
         self.page = page
 
     async def get_all_task_urls(self):
-        """Collect task detail URLs, stop after MAX_TASKS."""
         print(f"🔗 Starting pagination (limit {MAX_TASKS} tasks)...")
         all_urls = []
         page_num = 1
-
         await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
 
         while True:
@@ -87,14 +85,12 @@ class TaskyScraper:
                         new_urls.append(detail_url)
             all_urls.extend(new_urls)
             print(f"   Found {len(new_urls)} new tasks (total: {len(all_urls)})")
-
             if len(all_urls) >= MAX_TASKS:
                 print(f"🏁 Reached limit of {MAX_TASKS} tasks – stopping pagination.")
                 all_urls = all_urls[:MAX_TASKS]
                 break
 
             first_url = new_urls[0] if new_urls else None
-
             next_btn = await self.page.query_selector('.mat-mdc-paginator-navigation-next:not([disabled])')
             if not next_btn:
                 next_btn = await self.page.query_selector('button[aria-label="Next page"]:not([disabled])')
@@ -104,7 +100,6 @@ class TaskyScraper:
 
             print("   Clicking Next...")
             await next_btn.click()
-
             try:
                 await self.page.wait_for_function(
                     f'''() => {{
@@ -130,51 +125,43 @@ class TaskyScraper:
         return all_urls
 
     async def extract_task_details(self, url):
-        """Extract prompt, response, sentiment, issue type, user comment."""
+        """Extract prompt, response, sentiment, issue type, user comment using correct selectors."""
         await self.page.goto(url)
         await self.page.wait_for_load_state("networkidle")
         await asyncio.sleep(3)
 
-        # Prompt: inside <p class="interpretation"> after the heading
+        # ----- Prompt -----
         prompt = "Not found"
         try:
-            interpretation_elem = await self.page.query_selector('p.interpretation')
-            if interpretation_elem:
-                # Get all text, then remove the "Interpretation" heading part
-                full_text = await interpretation_elem.inner_text()
-                # The heading is "Interpretation" followed immediately by the question
-                # Remove the word "Interpretation" (case-insensitive)
+            prompt_elem = await self.page.query_selector('p.interpretation')
+            if prompt_elem:
+                full_text = await prompt_elem.inner_text()
                 prompt = re.sub(r'^Interpretation\s*', '', full_text, flags=re.IGNORECASE).strip()
-                if not prompt:
-                    prompt = full_text.strip()
         except Exception as e:
-            print(f"  Prompt extraction error: {e}")
+            print(f"  Prompt error: {e}")
 
-        # Response: inside <p data-test-id="magi-response">
+        # ----- Response -----
         response = "Not found"
         try:
-            resp_elem = await self.page.query_selector('p[data-test-id="magi-response"]')
+            resp_elem = await self.page.query_selector('div.bubble.highlighted p[data-test-id="magi-response"]')
+            if not resp_elem:
+                resp_elem = await self.page.query_selector('p[data-test-id="magi-response"]')
             if resp_elem:
-                # Get inner HTML or text – we'll take inner_text for plain text
                 response = (await resp_elem.inner_text()).strip()
-                # Remove any trailing <<!floatImage...>> if present
                 response = re.sub(r'\s*<<!floatImage\(.*?\)>>\s*$', '', response)
         except Exception as e:
-            print(f"  Response extraction error: {e}")
+            print(f"  Response error: {e}")
 
-        # Feedback: User Sentiment, Issue Type, User Comment
+        # ----- Feedback -----
         sentiment = "Not found"
         issue_type = "Not found"
         user_comment = "Not found"
-
         try:
-            # Use XPath or CSS to find the pill containers
-            # Each pill-container has a span.pill-label and span.issue-type (or p.comment)
-            sentiment_elem = await self.page.query_selector(
+            sent_elem = await self.page.query_selector(
                 'div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type'
             )
-            if sentiment_elem:
-                sentiment = (await sentiment_elem.inner_text()).strip()
+            if sent_elem:
+                sentiment = (await sent_elem.inner_text()).strip()
 
             issue_elem = await self.page.query_selector(
                 'div.pill-container:has(span.pill-label:has-text("Issue Type")) span.issue-type'
@@ -182,13 +169,11 @@ class TaskyScraper:
             if issue_elem:
                 issue_type = (await issue_elem.inner_text()).strip()
 
-            comment_elem = await self.page.query_selector(
-                'div.pill-container.comment-container p.comment'
-            )
+            comment_elem = await self.page.query_selector('div.pill-container.comment-container p.comment')
             if comment_elem:
                 user_comment = (await comment_elem.inner_text()).strip()
         except Exception as e:
-            print(f"  Feedback extraction error: {e}")
+            print(f"  Feedback error: {e}")
 
         return (prompt, response, sentiment, issue_type, user_comment)
 
@@ -235,7 +220,6 @@ async def main():
                 print(f"❌ Error on {url}: {e}")
                 all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR", "ERROR"])
 
-        # Set headers if sheet empty
         if not sheet.get_all_values():
             sheet.append_row(["Task URL", "Prompt", "Response", "Sentiment", "Issue Type", "User Comment"])
         safe_append_rows(sheet, all_rows)
