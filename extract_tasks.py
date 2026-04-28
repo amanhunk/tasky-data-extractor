@@ -11,13 +11,13 @@ from google.oauth2.service_account import Credentials
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
-MAX_TASKS = 10   # limit to 10 tasks for debugging
+MAX_TASKS = 10
 
 if not SHEET_URL or not TASK_LIST_URL:
     raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
 
 # ================= DEBUG FUNCTION =================
-def save_debug_info(page, url, task_number):
+async def save_debug_info(page, url, task_number):
     """Saves a screenshot and page HTML for debugging (only first task)"""
     if task_number == 1:
         try:
@@ -25,10 +25,10 @@ def save_debug_info(page, url, task_number):
             screenshot_path = f"debug_screenshot_{safe_url}.png"
             html_path = f"debug_page_{safe_url}.html"
             
-            page.screenshot(path=screenshot_path)
+            await page.screenshot(path=screenshot_path)
             print(f"   📸 Screenshot saved: {screenshot_path}")
             
-            html_content = page.content()
+            html_content = await page.content()
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
             print(f"   📄 Page HTML saved: {html_path}")
@@ -99,7 +99,8 @@ class TaskyScraper:
             for link in links:
                 match = re.search(r'/tasky/tasks/([^/?]+)', link)
                 if match:
-                    detail_url = f"https://hume.google.com/datachangereview/{match.group(1)}"
+                    # FIX: Use the correct detail page URL (not datachangereview)
+                    detail_url = f"https://hume.google.com/tasky/tasks/{match.group(1)}"
                     if detail_url not in all_urls:
                         new_urls.append(detail_url)
             all_urls.extend(new_urls)
@@ -146,16 +147,17 @@ class TaskyScraper:
     async def extract_task_details(self, url, task_number):
         print(f"\n--- Processing Task {task_number}: {url} ---")
         
+        # Wait for navigation to finish
+        await self.page.wait_for_load_state("networkidle")
+        await asyncio.sleep(2)
+        
         # Debug: print page title and URL
         title = await self.page.title()
         print(f"   🌐 Page title: '{title}'")
-        print(f"   🔗 URL snippet: '{self.page.url[-60:]}'")
+        print(f"   🔗 Current URL: '{self.page.url}'")
         
         # Save debug info for first task
-        save_debug_info(self.page, url, task_number)
-        
-        await self.page.wait_for_load_state("networkidle")
-        await asyncio.sleep(3)
+        await save_debug_info(self.page, url, task_number)
         
         # Check for login page
         if "login" in self.page.url.lower() or "signin" in self.page.url.lower():
@@ -240,6 +242,8 @@ async def main():
         print(f"\n📊 Extracting data from {len(detail_urls)} tasks (max {MAX_TASKS})...\n")
         for idx, url in enumerate(detail_urls, 1):
             try:
+                # Navigate to the task detail page
+                await page.goto(url, timeout=60000, wait_until="domcontentloaded")
                 prompt, response, sentiment, issue_type, user_comment = await scraper.extract_task_details(url, idx)
                 print(f"{idx}/{len(detail_urls)} {url}")
                 print(f"   Prompt: {prompt[:80]}...")
