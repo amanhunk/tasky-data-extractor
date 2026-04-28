@@ -8,6 +8,24 @@ from playwright.async_api import async_playwright
 import gspread
 from google.oauth2.service_account import Credentials
 
+def save_debug_info(page, url, task_number):
+    """Saves a screenshot and page HTML for debugging"""
+    if task_number == 1:  # only first task
+        try:
+            safe_url = url.replace('https://', '').replace('/', '_').replace(':', '_')
+            screenshot_path = f"debug_screenshot_{safe_url}.png"
+            html_path = f"debug_page_{safe_url}.html"
+            
+            page.screenshot(path=screenshot_path)
+            print(f"   📸 Screenshot saved: {screenshot_path}")
+            
+            html_content = page.content()
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            print(f"   📄 Page HTML saved: {html_path}")
+        except Exception as e:
+            print(f"   ⚠️ Failed to save debug info: {e}")
+
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
@@ -124,58 +142,70 @@ class TaskyScraper:
         print(f"✅ Returning {len(all_urls)} task URLs (limited to {MAX_TASKS})")
         return all_urls
 
-    async def extract_task_details(self, url):
-        """Extract prompt, response, sentiment, issue type, user comment using correct selectors."""
-        await self.page.goto(url)
-        await self.page.wait_for_load_state("networkidle")
-        await asyncio.sleep(3)
-
-        # ----- Prompt -----
-        prompt = "Not found"
-        try:
-            prompt_elem = await self.page.query_selector('p.interpretation')
-            if prompt_elem:
-                full_text = await prompt_elem.inner_text()
-                prompt = re.sub(r'^Interpretation\s*', '', full_text, flags=re.IGNORECASE).strip()
-        except Exception as e:
-            print(f"  Prompt error: {e}")
-
-        # ----- Response -----
-        response = "Not found"
-        try:
-            resp_elem = await self.page.query_selector('div.bubble.highlighted p[data-test-id="magi-response"]')
-            if not resp_elem:
-                resp_elem = await self.page.query_selector('p[data-test-id="magi-response"]')
-            if resp_elem:
-                response = (await resp_elem.inner_text()).strip()
-                response = re.sub(r'\s*<<!floatImage\(.*?\)>>\s*$', '', response)
-        except Exception as e:
-            print(f"  Response error: {e}")
-
-        # ----- Feedback -----
-        sentiment = "Not found"
-        issue_type = "Not found"
-        user_comment = "Not found"
-        try:
-            sent_elem = await self.page.query_selector(
-                'div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type'
-            )
-            if sent_elem:
-                sentiment = (await sent_elem.inner_text()).strip()
-
-            issue_elem = await self.page.query_selector(
-                'div.pill-container:has(span.pill-label:has-text("Issue Type")) span.issue-type'
-            )
-            if issue_elem:
-                issue_type = (await issue_elem.inner_text()).strip()
-
-            comment_elem = await self.page.query_selector('div.pill-container.comment-container p.comment')
-            if comment_elem:
-                user_comment = (await comment_elem.inner_text()).strip()
-        except Exception as e:
-            print(f"  Feedback error: {e}")
-
-        return (prompt, response, sentiment, issue_type, user_comment)
+    async def extract_task_details(self, url, task_number):
+    print(f"\n--- Processing Task {task_number}: {url} ---")
+    
+    # Debug: print page title and URL
+    title = await self.page.title()
+    print(f"   🌐 Page title: '{title}'")
+    print(f"   🔗 URL snippet: '{self.page.url[-60:]}'")
+    
+    # Save debug info for first task
+    save_debug_info(self.page, url, task_number)
+    
+    await self.page.wait_for_load_state("networkidle")
+    await asyncio.sleep(3)
+    
+    # Check for login page
+    if "login" in self.page.url.lower() or "signin" in self.page.url.lower():
+        print("   ❌❌❌ DETECTED LOGIN PAGE! Session expired. ❌❌❌")
+    
+    # ----- Prompt -----
+    prompt = "Not found"
+    try:
+        prompt_elem = await self.page.query_selector('p.interpretation')
+        if prompt_elem:
+            full_text = await prompt_elem.inner_text()
+            prompt = re.sub(r'^Interpretation\s*', '', full_text, flags=re.IGNORECASE).strip()
+    except Exception as e:
+        print(f"  Prompt error: {e}")
+    
+    # ----- Response -----
+    response = "Not found"
+    try:
+        resp_elem = await self.page.query_selector('div.bubble.highlighted p[data-test-id="magi-response"]')
+        if not resp_elem:
+            resp_elem = await self.page.query_selector('p[data-test-id="magi-response"]')
+        if resp_elem:
+            response = (await resp_elem.inner_text()).strip()
+            response = re.sub(r'\s*<<!floatImage\(.*?\)>>\s*$', '', response)
+    except Exception as e:
+        print(f"  Response error: {e}")
+    
+    # ----- Feedback -----
+    sentiment = "Not found"
+    issue_type = "Not found"
+    user_comment = "Not found"
+    try:
+        sent_elem = await self.page.query_selector(
+            'div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type'
+        )
+        if sent_elem:
+            sentiment = (await sent_elem.inner_text()).strip()
+        
+        issue_elem = await self.page.query_selector(
+            'div.pill-container:has(span.pill-label:has-text("Issue Type")) span.issue-type'
+        )
+        if issue_elem:
+            issue_type = (await issue_elem.inner_text()).strip()
+        
+        comment_elem = await self.page.query_selector('div.pill-container.comment-container p.comment')
+        if comment_elem:
+            user_comment = (await comment_elem.inner_text()).strip()
+    except Exception as e:
+        print(f"  Feedback error: {e}")
+    
+    return (prompt, response, sentiment, issue_type, user_comment)
 
 # ================= MAIN =================
 async def main():
@@ -209,7 +239,7 @@ async def main():
         print(f"\n📊 Extracting data from {len(detail_urls)} tasks (max {MAX_TASKS})...\n")
         for idx, url in enumerate(detail_urls, 1):
             try:
-                prompt, response, sentiment, issue_type, user_comment = await scraper.extract_task_details(url)
+                prompt, response, sentiment, issue_type, user_comment = await scraper.extract_task_details(url, idx)
                 print(f"{idx}/{len(detail_urls)} {url}")
                 print(f"   Prompt: {prompt[:80]}...")
                 print(f"   Response: {response[:80]}...")
