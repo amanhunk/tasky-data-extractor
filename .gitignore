@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+session.json
+credentials.json
+config.json
+*.log
+.DS_Store
+Thumbs.db
