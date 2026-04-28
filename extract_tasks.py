@@ -12,6 +12,8 @@ from google.oauth2.service_account import Credentials
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
+MAX_TASKS = 100  # <-- LIMIT TO 100 TASKS
+
 if not SHEET_URL or not TASK_LIST_URL:
     raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
 
@@ -43,28 +45,20 @@ def load_session_from_env():
     if not session_b64:
         raise ValueError("Missing SESSION_JSON_B64 environment variable")
     print(f"✅ SESSION_JSON_B64 length: {len(session_b64)} characters")
-    
-    # Decode base64
     try:
         session_json = base64.b64decode(session_b64).decode('utf-8')
         print(f"✅ Decoding successful, decoded length: {len(session_json)} characters")
     except Exception as e:
         raise ValueError(f"Base64 decoding failed: {e}")
-    
-    # Validate JSON
     if not session_json.strip().startswith('{'):
-        raise ValueError("Decoded session JSON does not start with '{' – maybe not a valid session.json?")
-    
-    # Write to file
+        raise ValueError("Decoded session JSON does not start with '{' – maybe not valid?")
     with open("session.json", "w") as f:
         f.write(session_json)
-    
-    # Verify file created
     if os.path.exists("session.json"):
         file_size = os.path.getsize("session.json")
         print(f"✅ session.json written successfully, size = {file_size} bytes")
     else:
-        raise RuntimeError("Failed to write session.json (file not found after write)")
+        raise RuntimeError("Failed to write session.json")
 
 # ================= SCRAPER =================
 class TaskyScraper:
@@ -72,8 +66,8 @@ class TaskyScraper:
         self.page = page
 
     async def get_all_task_urls(self):
-        """Paginate through all pages and collect direct task detail URLs."""
-        print("🔗 Starting pagination...")
+        """Collect task detail URLs, stop after MAX_TASKS."""
+        print(f"🔗 Starting pagination (limit {MAX_TASKS} tasks)...")
         all_urls = []
         page_num = 1
 
@@ -94,6 +88,12 @@ class TaskyScraper:
                         new_urls.append(detail_url)
             all_urls.extend(new_urls)
             print(f"   Found {len(new_urls)} new tasks (total: {len(all_urls)})")
+
+            # Stop if we reached the limit
+            if len(all_urls) >= MAX_TASKS:
+                print(f"🏁 Reached limit of {MAX_TASKS} tasks – stopping pagination.")
+                all_urls = all_urls[:MAX_TASKS]
+                break
 
             first_url = new_urls[0] if new_urls else None
 
@@ -128,7 +128,7 @@ class TaskyScraper:
                 print("⚠️ Stopped at page limit 500.")
                 break
 
-        print(f"✅ Total unique task URLs: {len(all_urls)}")
+        print(f"✅ Returning {len(all_urls)} task URLs (limited to {MAX_TASKS})")
         return all_urls
 
     async def extract_task_details(self, url):
@@ -137,12 +137,8 @@ class TaskyScraper:
         await self.page.wait_for_load_state("networkidle")
         await asyncio.sleep(3)
 
-        prompt = ""
-        response = ""
-        sentiment = ""
-        issue_type = ""
+        prompt = response = sentiment = issue_type = ""
 
-        # Extract Prompt (Interpretation)
         try:
             page_text = await self.page.evaluate('document.body.innerText')
             match = re.search(r'Interpretation\s*\n\s*([^\n]+)', page_text)
@@ -151,7 +147,6 @@ class TaskyScraper:
         except Exception as e:
             print(f"  Prompt extraction error: {e}")
 
-        # Extract Response (modelResponse)
         try:
             page_text = await self.page.evaluate('document.body.innerText')
             match = re.search(r'"modelResponse":\s*"([^"\\]*(?:\\.[^"\\]*)*)"', page_text)
@@ -160,7 +155,6 @@ class TaskyScraper:
         except Exception as e:
             print(f"  Response extraction error: {e}")
 
-        # Extract Sentiment & Issue Type
         try:
             page_text = await self.page.evaluate('document.body.innerText')
             sent_match = re.search(r'User Sentiment:\s*(\w+)', page_text, re.IGNORECASE)
@@ -182,10 +176,7 @@ async def main():
     print("🏁 Current working directory:", os.getcwd())
     print("📁 Directory contents:", os.listdir('.'))
 
-    # Load session from environment variable
     load_session_from_env()
-
-    # Initialize Google Sheets
     sheet = init_sheet()
     print("✅ Google Sheets connected.")
 
@@ -209,7 +200,7 @@ async def main():
             return
 
         all_rows = []
-        print(f"\n📊 Extracting data from {len(detail_urls)} tasks...\n")
+        print(f"\n📊 Extracting data from {len(detail_urls)} tasks (max {MAX_TASKS})...\n")
         for idx, url in enumerate(detail_urls, 1):
             try:
                 prompt, response, sentiment, issue_type = await scraper.extract_task_details(url)
