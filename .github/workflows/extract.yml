@@ -1,0 +1,26 @@
+name: Extract Task Data
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # daily at 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+      - name: Run extractor
+        env:
+          SHEET_URL: ${{ secrets.SHEET_URL }}
+          TASK_LIST_URL: ${{ secrets.TASK_LIST_URL }}
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
+          SESSION_JSON_B64: ${{ secrets.SESSION_JSON_B64 }}
+        run: python extract_tasks.py
