@@ -3,28 +3,44 @@ import os
 import asyncio
 import time
 import re
-import base64
 from playwright.async_api import async_playwright
 import gspread
 from google.oauth2.service_account import Credentials
 
 # ================= CONFIG =================
-# Read from environment variables only (set in GitHub Secrets)
-SHEET_URL = os.environ.get("https://docs.google.com/spreadsheets/d/1H2Fs0bshg_zPSH6gGumC7QjkNfo3dXgOZarTLTyJfCc/edit?gid=0#gid=0")
-TASK_LIST_URL = os.environ.get("https://hume.google.com/tasky/tasks?filter=job:aim_loss_pattern_labeling%20status:completed%20update_time%3E2026-04-01")
+# Load from config.json if exists, otherwise use environment variables
+CONFIG_FILE = "config.json"
+if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "r") as f:
+        config = json.load(f)
+    SHEET_URL = config.get("sheet_url", os.environ.get("SHEET_URL"))
+    TASK_LIST_URL = config.get("task_list_url", os.environ.get("TASK_LIST_URL"))
+else:
+    SHEET_URL = os.environ.get("SHEET_URL")
+    TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
+
 if not SHEET_URL or not TASK_LIST_URL:
-    raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
+    raise ValueError("Missing SHEET_URL or TASK_LIST_URL. Set via config.json or environment variables.")
 
 # ================= GOOGLE SHEETS =================
 def init_sheet():
     creds_json = os.environ.get("GOOGLE_CREDS")
-    if not creds_json:
-        raise ValueError("Missing GOOGLE_CREDS environment variable")
-    creds_dict = json.loads(creds_json)
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        print("✅ Using credentials from environment variable")
+    elif os.path.exists("credentials.json"):
+        creds = Credentials.from_service_account_file(
+            "credentials.json",
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        print("✅ Using credentials from file (credentials.json)")
+    else:
+        raise FileNotFoundError("No Google credentials found. Set GOOGLE_CREDS env or place credentials.json")
+
     client = gspread.authorize(creds)
     sheet = client.open_by_url(SHEET_URL).sheet1
     return sheet
@@ -37,14 +53,6 @@ def safe_append_rows(sheet, rows):
         except Exception as e:
             print(f"Retry {i+1} (Google Sheets error):", e)
             time.sleep(3)
-
-def load_session_from_env():
-    session_b64 = os.environ.get("SESSION_JSON_B64")
-    if not session_b64:
-        raise ValueError("Missing SESSION_JSON_B64 environment variable")
-    session_json = base64.b64decode(session_b64).decode('utf-8')
-    with open("session.json", "w") as f:
-        f.write(session_json)
 
 # ================= SCRAPER =================
 class TaskyScraper:
@@ -115,7 +123,7 @@ class TaskyScraper:
         """Extract prompt, response, sentiment, issue type from task detail page."""
         await self.page.goto(url)
         await self.page.wait_for_load_state("networkidle")
-        await asyncio.sleep(3)  # increased for CI
+        await asyncio.sleep(2)
 
         prompt = ""
         response = ""
@@ -159,7 +167,6 @@ class TaskyScraper:
 
 # ================= MAIN =================
 async def main():
-    load_session_from_env()
     sheet = init_sheet()
     async with async_playwright() as p:
         browser = await p.chromium.launch(
