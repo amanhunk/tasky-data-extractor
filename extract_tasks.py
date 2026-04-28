@@ -4,7 +4,6 @@ import asyncio
 import time
 import re
 import base64
-import sys
 from playwright.async_api import async_playwright
 import gspread
 from google.oauth2.service_account import Credentials
@@ -12,7 +11,7 @@ from google.oauth2.service_account import Credentials
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
-MAX_TASKS = 100  # <-- LIMIT TO 100 TASKS
+MAX_TASKS = 100  # limit to 100 tasks
 
 if not SHEET_URL or not TASK_LIST_URL:
     raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
@@ -89,7 +88,6 @@ class TaskyScraper:
             all_urls.extend(new_urls)
             print(f"   Found {len(new_urls)} new tasks (total: {len(all_urls)})")
 
-            # Stop if we reached the limit
             if len(all_urls) >= MAX_TASKS:
                 print(f"🏁 Reached limit of {MAX_TASKS} tasks – stopping pagination.")
                 all_urls = all_urls[:MAX_TASKS]
@@ -132,44 +130,67 @@ class TaskyScraper:
         return all_urls
 
     async def extract_task_details(self, url):
-        """Extract prompt, response, sentiment, issue type from task detail page."""
+        """Extract prompt, response, sentiment, issue type, user comment."""
         await self.page.goto(url)
         await self.page.wait_for_load_state("networkidle")
         await asyncio.sleep(3)
 
-        prompt = response = sentiment = issue_type = ""
-
+        # Prompt: inside <p class="interpretation"> after the heading
+        prompt = "Not found"
         try:
-            page_text = await self.page.evaluate('document.body.innerText')
-            match = re.search(r'Interpretation\s*\n\s*([^\n]+)', page_text)
-            if match:
-                prompt = match.group(1).strip()
+            interpretation_elem = await self.page.query_selector('p.interpretation')
+            if interpretation_elem:
+                # Get all text, then remove the "Interpretation" heading part
+                full_text = await interpretation_elem.inner_text()
+                # The heading is "Interpretation" followed immediately by the question
+                # Remove the word "Interpretation" (case-insensitive)
+                prompt = re.sub(r'^Interpretation\s*', '', full_text, flags=re.IGNORECASE).strip()
+                if not prompt:
+                    prompt = full_text.strip()
         except Exception as e:
             print(f"  Prompt extraction error: {e}")
 
+        # Response: inside <p data-test-id="magi-response">
+        response = "Not found"
         try:
-            page_text = await self.page.evaluate('document.body.innerText')
-            match = re.search(r'"modelResponse":\s*"([^"\\]*(?:\\.[^"\\]*)*)"', page_text)
-            if match:
-                response = match.group(1).replace('\\"', '"').replace('\\n', ' ')
+            resp_elem = await self.page.query_selector('p[data-test-id="magi-response"]')
+            if resp_elem:
+                # Get inner HTML or text – we'll take inner_text for plain text
+                response = (await resp_elem.inner_text()).strip()
+                # Remove any trailing <<!floatImage...>> if present
+                response = re.sub(r'\s*<<!floatImage\(.*?\)>>\s*$', '', response)
         except Exception as e:
             print(f"  Response extraction error: {e}")
 
+        # Feedback: User Sentiment, Issue Type, User Comment
+        sentiment = "Not found"
+        issue_type = "Not found"
+        user_comment = "Not found"
+
         try:
-            page_text = await self.page.evaluate('document.body.innerText')
-            sent_match = re.search(r'User Sentiment:\s*(\w+)', page_text, re.IGNORECASE)
-            if sent_match:
-                sentiment = sent_match.group(1).strip()
-            issue_match = re.search(r'Issue Type:\s*([^\n]+)', page_text, re.IGNORECASE)
-            if issue_match:
-                issue_type = issue_match.group(1).strip()
+            # Use XPath or CSS to find the pill containers
+            # Each pill-container has a span.pill-label and span.issue-type (or p.comment)
+            sentiment_elem = await self.page.query_selector(
+                'div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type'
+            )
+            if sentiment_elem:
+                sentiment = (await sentiment_elem.inner_text()).strip()
+
+            issue_elem = await self.page.query_selector(
+                'div.pill-container:has(span.pill-label:has-text("Issue Type")) span.issue-type'
+            )
+            if issue_elem:
+                issue_type = (await issue_elem.inner_text()).strip()
+
+            comment_elem = await self.page.query_selector(
+                'div.pill-container.comment-container p.comment'
+            )
+            if comment_elem:
+                user_comment = (await comment_elem.inner_text()).strip()
         except Exception as e:
             print(f"  Feedback extraction error: {e}")
 
-        return (prompt or "Not found",
-                response or "Not found",
-                sentiment or "Not found",
-                issue_type or "Not found")
+        return (prompt, response, sentiment, issue_type, user_comment)
 
 # ================= MAIN =================
 async def main():
@@ -203,18 +224,20 @@ async def main():
         print(f"\n📊 Extracting data from {len(detail_urls)} tasks (max {MAX_TASKS})...\n")
         for idx, url in enumerate(detail_urls, 1):
             try:
-                prompt, response, sentiment, issue_type = await scraper.extract_task_details(url)
+                prompt, response, sentiment, issue_type, user_comment = await scraper.extract_task_details(url)
                 print(f"{idx}/{len(detail_urls)} {url}")
                 print(f"   Prompt: {prompt[:80]}...")
                 print(f"   Response: {response[:80]}...")
-                print(f"   Sentiment: {sentiment}, Issue: {issue_type}\n")
-                all_rows.append([url, prompt, response, sentiment, issue_type])
+                print(f"   Sentiment: {sentiment}, Issue: {issue_type}")
+                print(f"   User Comment: {user_comment[:80]}...\n")
+                all_rows.append([url, prompt, response, sentiment, issue_type, user_comment])
             except Exception as e:
                 print(f"❌ Error on {url}: {e}")
-                all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR"])
+                all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR", "ERROR"])
 
+        # Set headers if sheet empty
         if not sheet.get_all_values():
-            sheet.append_row(["Task URL", "Prompt", "Response", "Sentiment", "Issue Type"])
+            sheet.append_row(["Task URL", "Prompt", "Response", "Sentiment", "Issue Type", "User Comment"])
         safe_append_rows(sheet, all_rows)
         print("\n✅ All data uploaded to Google Sheets!")
         await browser.close()
