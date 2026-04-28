@@ -3,44 +3,28 @@ import os
 import asyncio
 import time
 import re
+import base64
+import sys
 from playwright.async_api import async_playwright
 import gspread
 from google.oauth2.service_account import Credentials
 
 # ================= CONFIG =================
-# Load from config.json if exists, otherwise use environment variables
-CONFIG_FILE = "config.json"
-if os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, "r") as f:
-        config = json.load(f)
-    SHEET_URL = config.get("sheet_url", os.environ.get("SHEET_URL"))
-    TASK_LIST_URL = config.get("task_list_url", os.environ.get("TASK_LIST_URL"))
-else:
-    SHEET_URL = os.environ.get("SHEET_URL")
-    TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
-
+SHEET_URL = os.environ.get("SHEET_URL")
+TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
 if not SHEET_URL or not TASK_LIST_URL:
-    raise ValueError("Missing SHEET_URL or TASK_LIST_URL. Set via config.json or environment variables.")
+    raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
 
 # ================= GOOGLE SHEETS =================
 def init_sheet():
     creds_json = os.environ.get("GOOGLE_CREDS")
-    if creds_json:
-        creds_dict = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        print("✅ Using credentials from environment variable")
-    elif os.path.exists("credentials.json"):
-        creds = Credentials.from_service_account_file(
-            "credentials.json",
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        print("✅ Using credentials from file (credentials.json)")
-    else:
-        raise FileNotFoundError("No Google credentials found. Set GOOGLE_CREDS env or place credentials.json")
-
+    if not creds_json:
+        raise ValueError("Missing GOOGLE_CREDS environment variable")
+    creds_dict = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
     client = gspread.authorize(creds)
     sheet = client.open_by_url(SHEET_URL).sheet1
     return sheet
@@ -53,6 +37,34 @@ def safe_append_rows(sheet, rows):
         except Exception as e:
             print(f"Retry {i+1} (Google Sheets error):", e)
             time.sleep(3)
+
+def load_session_from_env():
+    session_b64 = os.environ.get("SESSION_JSON_B64")
+    if not session_b64:
+        raise ValueError("Missing SESSION_JSON_B64 environment variable")
+    print(f"✅ SESSION_JSON_B64 length: {len(session_b64)} characters")
+    
+    # Decode base64
+    try:
+        session_json = base64.b64decode(session_b64).decode('utf-8')
+        print(f"✅ Decoding successful, decoded length: {len(session_json)} characters")
+    except Exception as e:
+        raise ValueError(f"Base64 decoding failed: {e}")
+    
+    # Validate JSON
+    if not session_json.strip().startswith('{'):
+        raise ValueError("Decoded session JSON does not start with '{' – maybe not a valid session.json?")
+    
+    # Write to file
+    with open("session.json", "w") as f:
+        f.write(session_json)
+    
+    # Verify file created
+    if os.path.exists("session.json"):
+        file_size = os.path.getsize("session.json")
+        print(f"✅ session.json written successfully, size = {file_size} bytes")
+    else:
+        raise RuntimeError("Failed to write session.json (file not found after write)")
 
 # ================= SCRAPER =================
 class TaskyScraper:
@@ -123,7 +135,7 @@ class TaskyScraper:
         """Extract prompt, response, sentiment, issue type from task detail page."""
         await self.page.goto(url)
         await self.page.wait_for_load_state("networkidle")
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
         prompt = ""
         response = ""
@@ -167,7 +179,16 @@ class TaskyScraper:
 
 # ================= MAIN =================
 async def main():
+    print("🏁 Current working directory:", os.getcwd())
+    print("📁 Directory contents:", os.listdir('.'))
+
+    # Load session from environment variable
+    load_session_from_env()
+
+    # Initialize Google Sheets
     sheet = init_sheet()
+    print("✅ Google Sheets connected.")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -177,6 +198,7 @@ async def main():
         page = await context.new_page()
         scraper = TaskyScraper(page)
 
+        print("🌐 Navigating to task list...")
         await page.goto(TASK_LIST_URL, timeout=60000, wait_until="domcontentloaded")
         await page.wait_for_timeout(5000)
 
