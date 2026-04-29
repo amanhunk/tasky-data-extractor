@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
-MAX_TASKS = 10   # change to 100 later
+MAX_TASKS = 10
 HUME_EMAIL = os.environ.get("HUME_EMAIL")
 HUME_PASSWORD = os.environ.get("HUME_PASSWORD")
 
@@ -48,28 +48,48 @@ class TaskyScraper:
         self.page = page
 
     async def login(self):
-        """Log in to Hume using email/password."""
         print("🔐 Logging in dynamically...")
+        # Go to Hume
         await self.page.goto("https://hume.google.com/tasky/tasks", wait_until="domcontentloaded")
         await self.page.wait_for_timeout(3000)
 
-        # Check if already logged in (maybe session persisted)
+        # If already on the task list, return
         if "login" not in self.page.url.lower() and "signin" not in self.page.url.lower():
-            print("   Already logged in (session may have been reused).")
+            print("   Already logged in.")
             return
 
-        # Fill login form (adjust selectors if needed)
-        # Common Google login selectors
+        # Click the Google sign-in button (common selector)
         try:
-            await self.page.fill('input[type="email"]', HUME_EMAIL, timeout=10000)
-            await self.page.click('button:has-text("Next")')
-            await self.page.wait_for_timeout(2000)
-            await self.page.fill('input[type="password"]', HUME_PASSWORD, timeout=10000)
-            await self.page.click('button:has-text("Next")')
-            await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
-            print("   ✅ Login successful.")
-        except Exception as e:
-            raise Exception(f"Login failed: {e}")
+            await self.page.click('button:has-text("Sign in with Google")', timeout=10000)
+            print("   Clicked 'Sign in with Google'")
+        except:
+            # Maybe the button is different
+            try:
+                await self.page.click('div[aria-label="Sign in with Google"]', timeout=5000)
+            except:
+                pass
+
+        # Wait for Google login page
+        await self.page.wait_for_function(
+            '() => window.location.href.includes("accounts.google.com")',
+            timeout=15000
+        )
+        await self.page.wait_for_timeout(2000)
+
+        # Enter email
+        email_input = await self.page.wait_for_selector('input[type="email"]', timeout=10000)
+        await email_input.fill(HUME_EMAIL)
+        await self.page.click('button:has-text("Next")')
+        await self.page.wait_for_timeout(2000)
+
+        # Enter password
+        password_input = await self.page.wait_for_selector('input[type="password"]', timeout=10000)
+        await password_input.fill(HUME_PASSWORD)
+        await self.page.click('button:has-text("Next")')
+
+        # Wait for redirect back to Hume
+        await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
+        print("   ✅ Login successful.")
 
     async def get_all_task_urls(self):
         print(f"🔗 Extracting task links (limit {MAX_TASKS})...")
@@ -126,7 +146,7 @@ class TaskyScraper:
                     return ("ERROR_TIMEOUT",) * 5
                 await asyncio.sleep(5)
 
-        # ----- Prompt -----
+        # --- Extraction (same as before) ---
         prompt = "Not found"
         try:
             elem = await self.page.query_selector('p.interpretation')
@@ -141,7 +161,6 @@ class TaskyScraper:
         except Exception as e:
             print(f"  Prompt error: {e}")
 
-        # ----- Response -----
         response = "Not found"
         try:
             elem = await self.page.query_selector('div.bubble.highlighted p[data-test-id="magi-response"]')
@@ -153,7 +172,6 @@ class TaskyScraper:
         except Exception as e:
             print(f"  Response error: {e}")
 
-        # ----- Feedback -----
         sentiment = issue_type = user_comment = "Not found"
         try:
             sent_elem = await self.page.query_selector('div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type')
@@ -176,7 +194,6 @@ class TaskyScraper:
         print(f"   Prompt: {prompt[:60]}...")
         print(f"   Response: {response[:60]}...")
         print(f"   Sentiment: {sentiment}, Issue: {issue_type}")
-        print(f"   Comment: {user_comment[:60]}...")
         return (prompt, response, sentiment, issue_type, user_comment)
 
 # ================= MAIN =================
@@ -205,6 +222,7 @@ async def main():
 
         print("🌐 Navigating to task list...")
         await page.goto(TASK_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(5000)
         print(f"📄 Page title: {await page.title()}")
 
         task_urls = await scraper.get_all_task_urls()
