@@ -59,9 +59,19 @@ def safe_append(sheet, rows):
 # ================= SESSION =================
 def load_session():
     session_b64 = os.environ.get("SESSION_JSON_B64")
-    session_json = base64.b64decode(session_b64).decode("utf-8")
+
+    if not session_b64:
+        raise Exception("❌ SESSION_JSON_B64 is missing")
+
+    try:
+        session_json = base64.b64decode(session_b64).decode("utf-8")
+    except Exception as e:
+        raise Exception(f"❌ Base64 decode failed: {e}")
+
     with open("session.json", "w") as f:
         f.write(session_json)
+
+    print("✅ Session loaded")
 
 # ================= SCRAPER =================
 class TaskyScraper:
@@ -162,6 +172,13 @@ class TaskyScraper:
         return [url, prompt, response, sentiment, issue_type, user_comment]
 
 # ================= MAIN =================
+print("🚀 Script started")
+
+print("TASK_LIST_URL:", os.environ.get("TASK_LIST_URL"))
+print("SHEET_URL:", os.environ.get("SHEET_URL"))
+
+print("SESSION_JSON_B64 exists:", bool(os.environ.get("SESSION_JSON_B64")))
+print("GOOGLE_CREDS exists:", bool(os.environ.get("GOOGLE_CREDS")))
 async def main():
     print("🚀 Starting script...")
 
@@ -220,4 +237,16 @@ async def main():
         await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print("\n❌❌❌ SCRIPT FAILED ❌❌❌")
+        print("ERROR:", str(e))
+
+        import traceback
+        traceback.print_exc()
+
+        import sys
+        sys.stdout.flush()
+
+        raise
