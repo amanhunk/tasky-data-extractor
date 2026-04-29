@@ -68,13 +68,12 @@ class TaskyScraper:
         print(f"🔗 Extracting task links (limit {MAX_TASKS})...")
         all_urls = []
         page_num = 1
-
-        # Wait for the table rows or any link containing '/tasky/tasks/'
-        await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
-
+        
+        # Wait for links to appear
+        await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=60000)
+        
         while True:
             print(f"📄 Page {page_num}")
-            # Get all task links – using a more robust evaluation
             links = await self.page.eval_on_selector_all(
                 'a[href*="/tasky/tasks/"]',
                 'elements => elements.map(e => e.href)'
@@ -88,54 +87,65 @@ class TaskyScraper:
                         new_urls.append(detail_url)
             all_urls.extend(new_urls)
             print(f"   Found {len(new_urls)} new (total: {len(all_urls)})")
+            
             if len(all_urls) >= MAX_TASKS:
                 all_urls = all_urls[:MAX_TASKS]
                 break
-
-            # Try to find and click the "Next" button
+            
             next_btn = await self.page.query_selector('button[aria-label="Next page"]:not([disabled])')
             if not next_btn:
                 next_btn = await self.page.query_selector('.mat-mdc-paginator-navigation-next:not([disabled])')
             if not next_btn:
                 print("🏁 No enabled Next button – last page reached.")
                 break
+            
             await next_btn.click()
             await self.page.wait_for_load_state("networkidle")
             await asyncio.sleep(1)
             page_num += 1
             if page_num > 50:
                 break
-
+                
         print(f"✅ Returning {len(all_urls)} task URLs")
         return all_urls
 
     async def extract_task_details(self, url, task_number):
         print(f"\n--- Task {task_number}: {url} ---")
-        await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        retry_count = 0
+        while retry_count < 3:
+            try:
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                try:
+                    await self.page.wait_for_selector('p.interpretation, p[data-test-id="magi-response"]', timeout=45000)
+                    print("   ✅ Page content loaded")
+                    break
+                except:
+                    if "login" in self.page.url.lower() or "signin" in self.page.url.lower():
+                        print("❌ Authentication error: Detected a login page. The session has expired.")
+                        return ("ERROR_SESSION_EXPIRED",) * 5
+                    raise
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= 3: raise
+                print(f"⚠️ Timeout, retry {retry_count}/3...")
+                await asyncio.sleep(5)
+                continue
 
-        # Wait for either interpretation or response element (timeout 20s)
-        try:
-            await self.page.wait_for_selector('p.interpretation, p[data-test-id="magi-response"]', timeout=20000)
-            print("   ✅ Page content loaded")
-        except:
-            print("   ⚠️ Timeout waiting for content – page may be incomplete")
-            # Take screenshot for debugging
-            await self.page.screenshot(path=f"debug_timeout_{task_number}.png")
-            print(f"   📸 Saved screenshot: debug_timeout_{task_number}.png")
-        await asyncio.sleep(2)
-
-        # ----- Prompt (from p.interpretation) -----
+        # --- Data Extraction with Robust Selectors ---
         prompt = "Not found"
         try:
             elem = await self.page.query_selector('p.interpretation')
             if elem:
                 text = await elem.inner_text()
-                # Remove the "Interpretation" heading if present
                 prompt = re.sub(r'^Interpretation\s*', '', text, flags=re.IGNORECASE).strip()
+            else:
+                page_text = await self.page.evaluate('document.body.innerText')
+                match = re.search(r'Interpretation\s*\n\s*([^\n]+)', page_text, re.IGNORECASE)
+                if match:
+                    prompt = match.group(1).strip()
         except Exception as e:
             print(f"  Prompt error: {e}")
 
-        # ----- Response (from div.bubble.highlighted p[data-test-id="magi-response"]) -----
         response = "Not found"
         try:
             elem = await self.page.query_selector('div.bubble.highlighted p[data-test-id="magi-response"]')
@@ -143,42 +153,25 @@ class TaskyScraper:
                 elem = await self.page.query_selector('p[data-test-id="magi-response"]')
             if elem:
                 response = (await elem.inner_text()).strip()
-                # Remove any trailing <<!floatImage...>>
-                response = re.sub(r'\s*<<!floatImage\(.*?\)>>\s*$', '', response)
+                response = re.sub(r'<<!floatImage.*?>>', '', response, flags=re.DOTALL)
+            else:
+                page_text = await self.page.evaluate('document.body.innerText')
+                match = re.search(r'"modelResponse":\s*"([^"]+)"', page_text, re.IGNORECASE)
+                if match:
+                    response = match.group(1).replace('\\"', '"')
         except Exception as e:
             print(f"  Response error: {e}")
 
-        # ----- Feedback -----
-        sentiment = "Not found"
-        issue_type = "Not found"
-        user_comment = "Not found"
+        sentiment, issue_type, user_comment = ["Not found"] * 3
         try:
-            # Sentiment
-            sent_elem = await self.page.query_selector(
-                'div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type'
-            )
+            sent_elem = await self.page.query_selector('div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type')
             if sent_elem:
                 sentiment = (await sent_elem.inner_text()).strip()
-            else:
-                # Fallback: look at the text directly
-                page_text = await self.page.evaluate('document.body.innerText')
-                sent_match = re.search(r'User Sentiment:\s*(\w+)', page_text, re.IGNORECASE)
-                if sent_match:
-                    sentiment = sent_match.group(1)
 
-            # Issue Type
-            issue_elem = await self.page.query_selector(
-                'div.pill-container:has(span.pill-label:has-text("Issue Type")) span.issue-type'
-            )
+            issue_elem = await self.page.query_selector('div.pill-container:has(span.pill-label:has-text("Issue Type")) span.issue-type')
             if issue_elem:
                 issue_type = (await issue_elem.inner_text()).strip()
-            else:
-                page_text = await self.page.evaluate('document.body.innerText')
-                issue_match = re.search(r'Issue Type:\s*([^\n]+)', page_text, re.IGNORECASE)
-                if issue_match:
-                    issue_type = issue_match.group(1).strip()
 
-            # User Comment
             comment_elem = await self.page.query_selector('div.pill-container.comment-container p.comment')
             if comment_elem:
                 user_comment = (await comment_elem.inner_text()).strip()
@@ -190,12 +183,10 @@ class TaskyScraper:
         except Exception as e:
             print(f"  Feedback error: {e}")
 
-        # Print extracted data summary
         print(f"   Prompt: {prompt[:60]}...")
         print(f"   Response: {response[:60]}...")
         print(f"   Sentiment: {sentiment}, Issue: {issue_type}")
-        print(f"   Comment: {user_comment[:60]}...")
-        return (prompt, response, sentiment, issue_type, user_comment)
+        return (prompt, response, sentiment, issue_type, user_comment) if user_comment != "Not found" else (prompt, response, sentiment, issue_type, "None")
 
 # ================= MAIN =================
 async def main():
@@ -216,41 +207,32 @@ async def main():
         print("🌐 Opening task list...")
         await page.goto(TASK_LIST_URL, timeout=60000, wait_until="domcontentloaded")
         print(f"📄 Page title: {await page.title()}")
-
-        # Wait a bit for the table to render
         await page.wait_for_timeout(5000)
-
-        # Debug: take a screenshot of the list page
-        await page.screenshot(path="debug_list_page.png")
-        print("📸 Saved screenshot of list page: debug_list_page.png")
-
+        
         task_urls = await scraper.get_all_task_urls()
         if not task_urls:
-            print("❌ No task URLs extracted. Check that the list page contains task links.")
-            # Save page content for inspection
-            with open("debug_list.html", "w") as f:
-                f.write(await page.content())
-            print("💾 Saved HTML of list page: debug_list.html")
-            await browser.close()
+            print("❌ No task URLs extracted.")
             return
-
+        
         all_rows = []
         for idx, url in enumerate(task_urls, 1):
             try:
                 data = await scraper.extract_task_details(url, idx)
+                if data[0] == "ERROR_SESSION_EXPIRED":
+                    print("!!! SESSION EXPIRED. Stopping.")
+                    break
                 all_rows.append([url] + list(data))
             except Exception as e:
                 print(f"❌ Task {idx} error: {e}")
                 all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR", "ERROR"])
-
-        if not sheet.get_all_values():
-            sheet.append_row(["Task URL", "Prompt", "Response", "Sentiment", "Issue Type", "User Comment"])
+        
         if all_rows:
+            if not sheet.get_all_values():
+                sheet.append_row(["Task URL", "Prompt", "Response", "Sentiment", "Issue Type", "User Comment"])
             safe_append_rows(sheet, all_rows)
             print(f"✅ Uploaded {len(all_rows)} tasks to Google Sheets")
         else:
             print("⚠️ No data to upload")
-
         await browser.close()
 
 if __name__ == "__main__":
