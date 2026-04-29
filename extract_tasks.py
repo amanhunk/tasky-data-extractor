@@ -49,47 +49,72 @@ class TaskyScraper:
 
     async def login(self):
         print("🔐 Logging in dynamically...")
-        # Go to Hume
         await self.page.goto("https://hume.google.com/tasky/tasks", wait_until="domcontentloaded")
         await self.page.wait_for_timeout(3000)
 
-        # If already on the task list, return
         if "login" not in self.page.url.lower() and "signin" not in self.page.url.lower():
             print("   Already logged in.")
             return
 
-        # Click the Google sign-in button (common selector)
+        await self.page.screenshot(path="debug_before_login.png")
+        print("   📸 Saved debug_before_login.png")
+
         try:
             await self.page.click('button:has-text("Sign in with Google")', timeout=10000)
             print("   Clicked 'Sign in with Google'")
         except:
-            # Maybe the button is different
             try:
                 await self.page.click('div[aria-label="Sign in with Google"]', timeout=5000)
             except:
                 pass
 
-        # Wait for Google login page
         await self.page.wait_for_function(
             '() => window.location.href.includes("accounts.google.com")',
             timeout=15000
         )
         await self.page.wait_for_timeout(2000)
+        await self.page.screenshot(path="debug_google_page.png")
+        print("   📸 Saved debug_google_page.png")
 
-        # Enter email
-        email_input = await self.page.wait_for_selector('input[type="email"]', timeout=10000)
-        await email_input.fill(HUME_EMAIL)
-        await self.page.click('button:has-text("Next")')
-        await self.page.wait_for_timeout(2000)
+        # Handle account chooser
+        try:
+            account_selector = f'div[data-email="{HUME_EMAIL}"]'
+            account = await self.page.query_selector(account_selector, timeout=5000)
+            if account:
+                await account.click()
+                print("   Selected existing account")
+                await self.page.wait_for_timeout(2000)
+        except:
+            pass
 
-        # Enter password
-        password_input = await self.page.wait_for_selector('input[type="password"]', timeout=10000)
-        await password_input.fill(HUME_PASSWORD)
-        await self.page.click('button:has-text("Next")')
+        # Email step
+        try:
+            email_input = await self.page.wait_for_selector('input[type="email"]', timeout=8000)
+            await email_input.fill(HUME_EMAIL)
+            await self.page.click('button:has-text("Next")')
+            print("   Entered email and clicked Next")
+            await self.page.wait_for_timeout(3000)
+        except:
+            print("   Email field not found, maybe already at password step")
 
-        # Wait for redirect back to Hume
-        await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
-        print("   ✅ Login successful.")
+        # Password step
+        try:
+            password_input = await self.page.wait_for_selector('input[type="password"]', timeout=15000)
+            await password_input.fill(HUME_PASSWORD)
+            await self.page.click('button:has-text("Next")')
+            print("   Entered password and clicked Next")
+        except Exception as e:
+            await self.page.screenshot(path="debug_password_failed.png")
+            print(f"   ❌ Password field not found: {e}")
+            raise
+
+        # Wait for redirect
+        try:
+            await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
+            print("   ✅ Login successful.")
+        except:
+            await self.page.screenshot(path="debug_post_login.png")
+            raise Exception("Login succeeded but did not return to task list")
 
     async def get_all_task_urls(self):
         print(f"🔗 Extracting task links (limit {MAX_TASKS})...")
@@ -146,7 +171,7 @@ class TaskyScraper:
                     return ("ERROR_TIMEOUT",) * 5
                 await asyncio.sleep(5)
 
-        # --- Extraction (same as before) ---
+        # Extraction (same as before)
         prompt = "Not found"
         try:
             elem = await self.page.query_selector('p.interpretation')
