@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
-MAX_TASKS = 10
+MAX_TASKS = 10   # limit for testing
 
 if not SHEET_URL or not TASK_LIST_URL:
     raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
@@ -99,7 +99,6 @@ class TaskyScraper:
             for link in links:
                 match = re.search(r'/tasky/tasks/([^/?]+)', link)
                 if match:
-                    # FIX: Use the correct detail page URL (not datachangereview)
                     detail_url = f"https://hume.google.com/tasky/tasks/{match.group(1)}"
                     if detail_url not in all_urls:
                         new_urls.append(detail_url)
@@ -147,11 +146,29 @@ class TaskyScraper:
     async def extract_task_details(self, url, task_number):
         print(f"\n--- Processing Task {task_number}: {url} ---")
         
-        # Wait for navigation to finish
-        await self.page.wait_for_load_state("networkidle")
-        await asyncio.sleep(2)
+        # Navigate to the detail page
+        await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Debug: print page title and URL
+        # Wait for the page title to change from the list page
+        try:
+            await self.page.wait_for_function(
+                '''() => !document.title.includes('Tasks - Tasky')''',
+                timeout=15000
+            )
+            print("   ✅ Page title changed – detail page loaded.")
+        except:
+            print("   ⚠️ Page title still shows task list – detail page may not have loaded.")
+        
+        # Wait specifically for the interpretation element (prompt)
+        try:
+            await self.page.wait_for_selector('p.interpretation', timeout=15000)
+            print("   ✅ Found p.interpretation element.")
+        except:
+            print("   ❌ p.interpretation not found – detail page content missing.")
+        
+        await asyncio.sleep(2)  # extra buffer
+        
+        # Debug: print current title and URL
         title = await self.page.title()
         print(f"   🌐 Page title: '{title}'")
         print(f"   🔗 Current URL: '{self.page.url}'")
@@ -242,8 +259,6 @@ async def main():
         print(f"\n📊 Extracting data from {len(detail_urls)} tasks (max {MAX_TASKS})...\n")
         for idx, url in enumerate(detail_urls, 1):
             try:
-                # Navigate to the task detail page
-                await page.goto(url, timeout=60000, wait_until="domcontentloaded")
                 prompt, response, sentiment, issue_type, user_comment = await scraper.extract_task_details(url, idx)
                 print(f"{idx}/{len(detail_urls)} {url}")
                 print(f"   Prompt: {prompt[:80]}...")
