@@ -2,6 +2,7 @@ import json
 import os
 import asyncio
 import time
+import re
 import base64
 from playwright.async_api import async_playwright
 import gspread
@@ -10,17 +11,43 @@ from google.oauth2.service_account import Credentials
 # ================= CONFIG =================
 SHEET_URL = os.environ.get("SHEET_URL")
 TASK_LIST_URL = os.environ.get("TASK_LIST_URL")
-MAX_TASKS = 10
+MAX_TASKS = 10   # limit for testing
+
+if not SHEET_URL or not TASK_LIST_URL:
+    raise ValueError("Missing SHEET_URL or TASK_LIST_URL environment variables")
+
+# ================= DEBUG FUNCTION =================
+async def save_debug_info(page, url, task_number):
+    """Saves a screenshot and page HTML for debugging (only first task)"""
+    if task_number == 1:
+        try:
+            safe_url = url.replace('https://', '').replace('/', '_').replace(':', '_')
+            screenshot_path = f"debug_screenshot_{safe_url}.png"
+            html_path = f"debug_page_{safe_url}.html"
+            
+            await page.screenshot(path=screenshot_path)
+            print(f"   📸 Screenshot saved: {screenshot_path}")
+            
+            html_content = await page.content()
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            print(f"   📄 Page HTML saved: {html_path}")
+        except Exception as e:
+            print(f"   ⚠️ Failed to save debug info: {e}")
 
 # ================= GOOGLE SHEETS =================
 def init_sheet():
-    creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
+    creds_json = os.environ.get("GOOGLE_CREDS")
+    if not creds_json:
+        raise ValueError("Missing GOOGLE_CREDS environment variable")
+    creds_dict = json.loads(creds_json)
     creds = Credentials.from_service_account_info(
         creds_dict,
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
     client = gspread.authorize(creds)
-    return client.open_by_url(SHEET_URL).sheet1
+    sheet = client.open_by_url(SHEET_URL).sheet1
+    return sheet
 
 def safe_append_rows(sheet, rows):
     for i in range(3):
@@ -28,147 +55,226 @@ def safe_append_rows(sheet, rows):
             sheet.append_rows(rows)
             return
         except Exception as e:
-            print(f"Retry {i+1}:", e)
+            print(f"Retry {i+1} (Google Sheets error):", e)
             time.sleep(3)
 
-# ================= SESSION =================
-def load_session():
+def load_session_from_env():
     session_b64 = os.environ.get("SESSION_JSON_B64")
-    session_json = base64.b64decode(session_b64).decode("utf-8")
+    if not session_b64:
+        raise ValueError("Missing SESSION_JSON_B64 environment variable")
+    print(f"✅ SESSION_JSON_B64 length: {len(session_b64)} characters")
+    try:
+        session_json = base64.b64decode(session_b64).decode('utf-8')
+        print(f"✅ Decoding successful, decoded length: {len(session_json)} characters")
+    except Exception as e:
+        raise ValueError(f"Base64 decoding failed: {e}")
+    if not session_json.strip().startswith('{'):
+        raise ValueError("Decoded session JSON does not start with '{' – maybe not valid?")
     with open("session.json", "w") as f:
         f.write(session_json)
+    if os.path.exists("session.json"):
+        file_size = os.path.getsize("session.json")
+        print(f"✅ session.json written successfully, size = {file_size} bytes")
+    else:
+        raise RuntimeError("Failed to write session.json")
 
 # ================= SCRAPER =================
-class Scraper:
+class TaskyScraper:
     def __init__(self, page):
         self.page = page
 
-    async def get_task_links(self):
-        print("🔗 Extracting datachangereview links...")
+    async def get_all_task_urls(self):
+        print(f"🔗 Starting pagination (limit {MAX_TASKS} tasks)...")
+        all_urls = []
+        page_num = 1
+        await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
 
-        await self.page.wait_for_selector('a[href*="datachangereview"]', timeout=30000)
+        while True:
+            print(f"📄 Scraping page {page_num}...")
+            links = await self.page.eval_on_selector_all(
+                'a[href*="/tasky/tasks/"]',
+                'elements => elements.map(e => e.href)'
+            )
+            new_urls = []
+            for link in links:
+                match = re.search(r'/tasky/tasks/([^/?]+)', link)
+                if match:
+                    detail_url = f"https://hume.google.com/tasky/tasks/{match.group(1)}"
+                    if detail_url not in all_urls:
+                        new_urls.append(detail_url)
+            all_urls.extend(new_urls)
+            print(f"   Found {len(new_urls)} new tasks (total: {len(all_urls)})")
+            if len(all_urls) >= MAX_TASKS:
+                print(f"🏁 Reached limit of {MAX_TASKS} tasks – stopping pagination.")
+                all_urls = all_urls[:MAX_TASKS]
+                break
 
-        links = await self.page.eval_on_selector_all(
-            'a[href*="datachangereview"]',
-            'els => els.map(e => e.href)'
-        )
+            first_url = new_urls[0] if new_urls else None
+            next_btn = await self.page.query_selector('.mat-mdc-paginator-navigation-next:not([disabled])')
+            if not next_btn:
+                next_btn = await self.page.query_selector('button[aria-label="Next page"]:not([disabled])')
+            if not next_btn:
+                print("🏁 No enabled Next button – last page reached.")
+                break
 
-        # remove duplicates
-        links = list(dict.fromkeys(links))
+            print("   Clicking Next...")
+            await next_btn.click()
+            try:
+                await self.page.wait_for_function(
+                    f'''() => {{
+                        const first = document.querySelector('a[href*="/tasky/tasks/"]');
+                        if (!first) return false;
+                        return first.href !== '{first_url}';
+                    }}''',
+                    timeout=15000
+                )
+                print("   Page changed – new tasks loaded.")
+            except:
+                print("⚠️ First link did not change – assuming no more pages.")
+                break
 
-        print(f"✅ Found {len(links)} links")
-        return links[:MAX_TASKS]
+            await self.page.wait_for_load_state("networkidle")
+            await asyncio.sleep(1)
+            page_num += 1
+            if page_num > 500:
+                print("⚠️ Stopped at page limit 500.")
+                break
 
-    async def extract(self, url, i):
-        print(f"\n--- Task {i} ---")
-        print("URL:", url)
+        print(f"✅ Returning {len(all_urls)} task URLs (limited to {MAX_TASKS})")
+        return all_urls
 
-        await self.page.goto(url, wait_until="networkidle")
-        await self.page.wait_for_timeout(3000)
-
-        print("🌐 Current URL:", self.page.url)
-
-        if "login" in self.page.url.lower():
-            print("❌ LOGIN PAGE DETECTED")
-            return ["ERROR"] * 5
-
-        # ---------- INTERPRETATION ----------
+    async def extract_task_details(self, url, task_number):
+        print(f"\n--- Processing Task {task_number}: {url} ---")
+        
+        # Navigate to the detail page
+        await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        
+        # Wait for the page title to change from the list page
+        try:
+            await self.page.wait_for_function(
+                '''() => !document.title.includes('Tasks - Tasky')''',
+                timeout=15000
+            )
+            print("   ✅ Page title changed – detail page loaded.")
+        except:
+            print("   ⚠️ Page title still shows task list – detail page may not have loaded.")
+        
+        # Wait specifically for the interpretation element (prompt)
+        try:
+            await self.page.wait_for_selector('p.interpretation', timeout=15000)
+            print("   ✅ Found p.interpretation element.")
+        except:
+            print("   ❌ p.interpretation not found – detail page content missing.")
+        
+        await asyncio.sleep(2)  # extra buffer
+        
+        # Debug: print current title and URL
+        title = await self.page.title()
+        print(f"   🌐 Page title: '{title}'")
+        print(f"   🔗 Current URL: '{self.page.url}'")
+        
+        # Save debug info for first task
+        await save_debug_info(self.page, url, task_number)
+        
+        # Check for login page
+        if "login" in self.page.url.lower() or "signin" in self.page.url.lower():
+            print("   ❌❌❌ DETECTED LOGIN PAGE! Session expired. ❌❌❌")
+        
+        # ----- Prompt -----
         prompt = "Not found"
         try:
-            el = self.page.locator('text=Interpretation').locator('xpath=..//p').first
-            if await el.count():
-                prompt = (await el.inner_text()).strip()
+            prompt_elem = await self.page.query_selector('p.interpretation')
+            if prompt_elem:
+                full_text = await prompt_elem.inner_text()
+                prompt = re.sub(r'^Interpretation\s*', '', full_text, flags=re.IGNORECASE).strip()
         except Exception as e:
-            print("Prompt error:", e)
-
-        # ---------- RESPONSE ----------
+            print(f"  Prompt error: {e}")
+        
+        # ----- Response -----
         response = "Not found"
         try:
-            el = self.page.locator('div.prose, div.markdown').first
-            if await el.count():
-                response = (await el.inner_text()).strip()
+            resp_elem = await self.page.query_selector('div.bubble.highlighted p[data-test-id="magi-response"]')
+            if not resp_elem:
+                resp_elem = await self.page.query_selector('p[data-test-id="magi-response"]')
+            if resp_elem:
+                response = (await resp_elem.inner_text()).strip()
+                response = re.sub(r'\s*<<!floatImage\(.*?\)>>\s*$', '', response)
         except Exception as e:
-            print("Response error:", e)
-
-        # ---------- SENTIMENT ----------
+            print(f"  Response error: {e}")
+        
+        # ----- Feedback -----
         sentiment = "Not found"
-        try:
-            el = self.page.locator('text=User Sentiment').locator('xpath=..//span').last
-            if await el.count():
-                sentiment = (await el.inner_text()).strip()
-        except:
-            pass
-
-        # ---------- ISSUE TYPE ----------
         issue_type = "Not found"
-        try:
-            el = self.page.locator('text=Issue Type').locator('xpath=..//span').last
-            if await el.count():
-                issue_type = (await el.inner_text()).strip()
-        except:
-            pass
-
-        # ---------- USER COMMENT ----------
         user_comment = "Not found"
         try:
-            el = self.page.locator('text=User Comment').locator('xpath=..//p').first
-            if await el.count():
-                user_comment = (await el.inner_text()).strip()
-        except:
-            pass
-
-        print("Prompt:", prompt[:60])
-        print("Response:", response[:60])
-        print("Sentiment:", sentiment, "| Issue:", issue_type)
-
-        return [url, prompt, response, sentiment, issue_type, user_comment]
-
+            sent_elem = await self.page.query_selector(
+                'div.pill-container:has(span.pill-label:has-text("User Sentiment")) span.issue-type'
+            )
+            if sent_elem:
+                sentiment = (await sent_elem.inner_text()).strip()
+            
+            issue_elem = await self.page.query_selector(
+                'div.pill-container:has(span.pill-label:has-text("Issue Type")) span.issue-type'
+            )
+            if issue_elem:
+                issue_type = (await issue_elem.inner_text()).strip()
+            
+            comment_elem = await self.page.query_selector('div.pill-container.comment-container p.comment')
+            if comment_elem:
+                user_comment = (await comment_elem.inner_text()).strip()
+        except Exception as e:
+            print(f"  Feedback error: {e}")
+        
+        return (prompt, response, sentiment, issue_type, user_comment)
 
 # ================= MAIN =================
 async def main():
-    load_session()
+    print("🏁 Current working directory:", os.getcwd())
+    print("📁 Directory contents:", os.listdir('.'))
+
+    load_session_from_env()
     sheet = init_sheet()
-    print("✅ Sheet connected")
+    print("✅ Google Sheets connected.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=['--no-sandbox']
+            args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
         )
-
         context = await browser.new_context(storage_state="session.json")
         page = await context.new_page()
+        scraper = TaskyScraper(page)
 
-        print("🌐 Opening task list...")
-        await page.goto(TASK_LIST_URL, wait_until="networkidle")
+        print("🌐 Navigating to task list...")
+        await page.goto(TASK_LIST_URL, timeout=60000, wait_until="domcontentloaded")
         await page.wait_for_timeout(5000)
 
-        scraper = Scraper(page)
-        links = await scraper.get_task_links()
-
-        if not links:
-            print("❌ No links found")
+        detail_urls = await scraper.get_all_task_urls()
+        if not detail_urls:
+            print("❌ No tasks found.")
+            await browser.close()
             return
 
-        rows = []
-
-        for i, url in enumerate(links, 1):
+        all_rows = []
+        print(f"\n📊 Extracting data from {len(detail_urls)} tasks (max {MAX_TASKS})...\n")
+        for idx, url in enumerate(detail_urls, 1):
             try:
-                data = await scraper.extract(url, i)
-                rows.append(data)
+                prompt, response, sentiment, issue_type, user_comment = await scraper.extract_task_details(url, idx)
+                print(f"{idx}/{len(detail_urls)} {url}")
+                print(f"   Prompt: {prompt[:80]}...")
+                print(f"   Response: {response[:80]}...")
+                print(f"   Sentiment: {sentiment}, Issue: {issue_type}")
+                print(f"   User Comment: {user_comment[:80]}...\n")
+                all_rows.append([url, prompt, response, sentiment, issue_type, user_comment])
             except Exception as e:
-                print("Error:", e)
-                rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR", "ERROR"])
+                print(f"❌ Error on {url}: {e}")
+                all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR", "ERROR"])
 
-        # header
         if not sheet.get_all_values():
-            sheet.append_row(["URL", "Prompt", "Response", "Sentiment", "Issue", "Comment"])
-
-        safe_append_rows(sheet, rows)
-
-        print("\n✅ DONE: Data uploaded")
+            sheet.append_row(["Task URL", "Prompt", "Response", "Sentiment", "Issue Type", "User Comment"])
+        safe_append_rows(sheet, all_rows)
+        print("\n✅ All data uploaded to Google Sheets!")
         await browser.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
