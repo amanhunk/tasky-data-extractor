@@ -173,24 +173,33 @@ async def main():
 
         print("🌐 Opening task list...")
         await page.goto(TASK_LIST_URL, timeout=60000)
-        await asyncio.sleep(5)
 
-        # Step 1
+        # 🔥 Wait properly for page load
+        await page.wait_for_timeout(5000)
+
+        # ================= DEBUG START =================
         review_urls = await scraper.get_all_task_urls()
 
+        print(f"DEBUG: Found URLs = {len(review_urls)}")
+
         if not review_urls:
-            print("❌ No tasks found")
+            print("❌ No tasks found - possible login/session issue")
+
+            # 📸 Take screenshot for debugging
+            await page.screenshot(path="debug.png")
+
             await browser.close()
             return
+        # ================= DEBUG END =================
 
         print(f"\n📊 Extracting {len(review_urls)} tasks...\n")
 
         all_rows = []
 
-        # ✅ SAFETY LIMIT AGAIN
         for idx, url in enumerate(review_urls[:MAX_TASKS], 1):
             try:
                 query, interpretation, response, comment = await scraper.extract_task_data(url)
+
                 print(f"{idx}/{MAX_TASKS} ✅")
 
                 all_rows.append([
@@ -205,9 +214,13 @@ async def main():
                 print(f"❌ Error on {url}: {e}")
                 all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR"])
 
-        safe_append_rows(sheet, all_rows)
+        # Upload data
+        if all_rows:
+            safe_append_rows(sheet, all_rows)
+            print(f"\n✅ Uploaded {len(all_rows)} rows to Google Sheets!")
+        else:
+            print("⚠️ No data to upload")
 
-        print("\n✅ Data uploaded to Google Sheets!")
         await browser.close()
 
 
