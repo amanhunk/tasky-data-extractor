@@ -11,6 +11,8 @@ from google.oauth2.service_account import Credentials
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1L1IhWoaMMIWjCW1v19KRc-8_ujdnM0Min2mw4mGVig8/edit"
 TASK_LIST_URL = "https://hume.google.com/tasky/tasks?filter=job:aim_loss_pattern_labeling%20status:completed"
 
+MAX_TASKS = 10  # ✅ LIMIT ADDED
+
 # ================= GOOGLE SHEETS =================
 def init_sheet():
     creds_json = os.environ.get("GOOGLE_CREDS")
@@ -50,7 +52,7 @@ class TaskyScraper:
         self.page = page
 
     async def get_all_task_urls(self):
-        """Paginate through all pages and collect review URLs."""
+        """Paginate and collect LIMITED review URLs."""
         print("🔗 Collecting task URLs...")
         all_urls = []
         page_num = 1
@@ -75,6 +77,11 @@ class TaskyScraper:
 
             all_urls.extend(new_urls)
             print(f"   ➜ {len(new_urls)} new (total: {len(all_urls)})")
+
+            # ✅ STOP when limit reached
+            if len(all_urls) >= MAX_TASKS:
+                print(f"⛔ Reached limit of {MAX_TASKS} tasks")
+                return all_urls[:MAX_TASKS]
 
             first_url = new_urls[0] if new_urls else None
 
@@ -104,12 +111,13 @@ class TaskyScraper:
             await asyncio.sleep(1)
 
             page_num += 1
-            if page_num > 200:
+            if page_num > 50:
                 print("⚠️ Page limit reached")
                 break
 
         print(f"✅ Total URLs: {len(all_urls)}")
-        return all_urls
+        return all_urls[:MAX_TASKS]
+
 
     async def extract_task_data(self, url):
         """Extract Query, Interpretation, Response, User Comment"""
@@ -121,25 +129,25 @@ class TaskyScraper:
         except:
             return "", "", "", ""
 
-        # --- Query ---
+        # Query
         try:
             query = await self.page.locator('.bubble p:not(.interpretation)').first.inner_text()
         except:
             query = ""
 
-        # --- Interpretation ---
+        # Interpretation
         try:
             interpretation = await self.page.locator('.bubble .interpretation').inner_text()
         except:
             interpretation = ""
 
-        # --- Response ---
+        # Response
         try:
             response = await self.page.locator('[data-test-id="magi-response"]').inner_text()
         except:
             response = ""
 
-        # --- User Comment ---
+        # User Comment
         try:
             comment = await self.page.locator('.feedback-content .comment').inner_text()
         except:
@@ -155,10 +163,7 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-dev-shm-usage'
-            ]
+            args=['--no-sandbox', '--disable-dev-shm-usage']
         )
 
         context = await browser.new_context(storage_state="session.json")
@@ -168,10 +173,9 @@ async def main():
 
         print("🌐 Opening task list...")
         await page.goto(TASK_LIST_URL, timeout=60000)
-        await page.wait_for_load_state("networkidle")
         await asyncio.sleep(5)
 
-        # Step 1: Get all URLs
+        # Step 1
         review_urls = await scraper.get_all_task_urls()
 
         if not review_urls:
@@ -179,16 +183,15 @@ async def main():
             await browser.close()
             return
 
-        # Step 2: Extract data
         print(f"\n📊 Extracting {len(review_urls)} tasks...\n")
 
         all_rows = []
 
-        for idx, url in enumerate(review_urls, 1):
+        # ✅ SAFETY LIMIT AGAIN
+        for idx, url in enumerate(review_urls[:MAX_TASKS], 1):
             try:
                 query, interpretation, response, comment = await scraper.extract_task_data(url)
-
-                print(f"{idx}/{len(review_urls)} ✅")
+                print(f"{idx}/{MAX_TASKS} ✅")
 
                 all_rows.append([
                     url,
@@ -202,7 +205,6 @@ async def main():
                 print(f"❌ Error on {url}: {e}")
                 all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR"])
 
-        # Step 3: Upload
         safe_append_rows(sheet, all_rows)
 
         print("\n✅ Data uploaded to Google Sheets!")
