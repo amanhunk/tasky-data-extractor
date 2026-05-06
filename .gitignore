@@ -1,9 +1,22 @@
+# Python
 __pycache__/
 *.pyc
+
+# Environment
 .env
+
+# Secrets (VERY IMPORTANT)
 session.json
+session.txt
 credentials.json
 config.json
+
+# Logs
 *.log
+
+# OS files
 .DS_Store
 Thumbs.db
+
+# Virtual environment
+venv/
