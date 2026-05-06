@@ -1,27 +1,32 @@
 name: Extract Task Data
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'
-  workflow_dispatch:
 
 jobs:
   extract:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium
-      - name: Run extractor
+          playwright install
+
+      # ✅ Restore session.json from secret
+      - name: Restore session
+        run: |
+          echo "${{ secrets.SESSION_JSON }}" | base64 -d > session.json
+
+      - name: Run scraper
         env:
-          SHEET_URL: ${{ secrets.SHEET_URL }}
-          TASK_LIST_URL: ${{ secrets.TASK_LIST_URL }}
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
-          HUME_EMAIL: ${{ secrets.HUME_EMAIL }}
-          HUME_PASSWORD: ${{ secrets.HUME_PASSWORD }}
-        run: python extract_tasks.py
+        run: python scraper.py
