@@ -11,7 +11,8 @@ from google.oauth2.service_account import Credentials
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1L1IhWoaMMIWjCW1v19KRc-8_ujdnM0Min2mw4mGVig8/edit"
 TASK_LIST_URL = "https://hume.google.com/tasky/tasks?filter=job:aim_loss_pattern_labeling%20status:completed"
 
-MAX_TASKS = 10  # ✅ LIMIT ADDED
+MAX_TASKS = 10  # 🔥 LIMIT
+
 
 # ================= GOOGLE SHEETS =================
 def init_sheet():
@@ -23,7 +24,7 @@ def init_sheet():
             creds_dict,
             scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
-        print("✅ Using credentials from environment variable")
+        print("✅ Using credentials from environment")
     else:
         creds = Credentials.from_service_account_file(
             "credentials.json",
@@ -37,12 +38,17 @@ def init_sheet():
 
 
 def safe_append_rows(sheet, rows):
+    if not rows:
+        print("⚠️ No rows to upload")
+        return
+
     for i in range(3):
         try:
             sheet.append_rows(rows)
+            print(f"✅ Uploaded {len(rows)} rows to Google Sheets")
             return
         except Exception as e:
-            print(f"Retry {i+1} (Google Sheets error):", e)
+            print(f"Retry {i+1}:", e)
             time.sleep(3)
 
 
@@ -52,102 +58,62 @@ class TaskyScraper:
         self.page = page
 
     async def get_all_task_urls(self):
-        """Paginate and collect LIMITED review URLs."""
         print("🔗 Collecting task URLs...")
-        all_urls = []
-        page_num = 1
 
         await self.page.wait_for_selector('a[href*="/tasky/tasks/"]', timeout=30000)
 
-        while True:
-            print(f"📄 Page {page_num}")
+        links = await self.page.eval_on_selector_all(
+            'a[href*="/tasky/tasks/"]',
+            'elements => elements.map(e => e.href)'
+        )
 
-            links = await self.page.eval_on_selector_all(
-                'a[href*="/tasky/tasks/"]',
-                'elements => elements.map(e => e.href)'
-            )
+        urls = []
+        for link in links:
+            match = re.search(r'/tasky/tasks/([^/?]+)', link)
+            if match:
+                review_url = f"https://hume.google.com/datachangereview/{match.group(1)}"
+                urls.append(review_url)
 
-            new_urls = []
-            for link in links:
-                match = re.search(r'/tasky/tasks/([^/?]+)', link)
-                if match:
-                    review_url = f"https://hume.google.com/datachangereview/{match.group(1)}"
-                    if review_url not in all_urls:
-                        new_urls.append(review_url)
+        # 🔥 LIMIT HERE
+        urls = list(dict.fromkeys(urls))[:MAX_TASKS]
 
-            all_urls.extend(new_urls)
-            print(f"   ➜ {len(new_urls)} new (total: {len(all_urls)})")
-
-            # ✅ STOP when limit reached
-            if len(all_urls) >= MAX_TASKS:
-                print(f"⛔ Reached limit of {MAX_TASKS} tasks")
-                return all_urls[:MAX_TASKS]
-
-            first_url = new_urls[0] if new_urls else None
-
-            next_btn = await self.page.query_selector('.mat-mdc-paginator-navigation-next:not([disabled])')
-            if not next_btn:
-                next_btn = await self.page.query_selector('button[aria-label="Next page"]:not([disabled])')
-
-            if not next_btn:
-                print("🏁 No more pages")
-                break
-
-            await next_btn.click()
-
-            try:
-                await self.page.wait_for_function(
-                    f'''() => {{
-                        const first = document.querySelector('a[href*="/tasky/tasks/"]');
-                        return first && first.href !== '{first_url}';
-                    }}''',
-                    timeout=15000
-                )
-            except:
-                print("⚠️ Page did not change")
-                break
-
-            await self.page.wait_for_load_state("networkidle")
-            await asyncio.sleep(1)
-
-            page_num += 1
-            if page_num > 50:
-                print("⚠️ Page limit reached")
-                break
-
-        print(f"✅ Total URLs: {len(all_urls)}")
-        return all_urls[:MAX_TASKS]
-
+        print(f"✅ Found {len(urls)} task URLs (limited to {MAX_TASKS})")
+        return urls
 
     async def extract_task_data(self, url):
-        """Extract Query, Interpretation, Response, User Comment"""
-        await self.page.goto(url, timeout=60000)
-        await self.page.wait_for_load_state("networkidle")
+        print(f"🌐 Opening: {url}")
 
         try:
-            await self.page.wait_for_selector('.bubble', timeout=20000)
-        except:
+            await self.page.goto(url, timeout=60000)
+            await self.page.wait_for_load_state("domcontentloaded")
+            await asyncio.sleep(3)
+        except Exception as e:
+            print("❌ Page load error:", e)
             return "", "", "", ""
 
-        # Query
+        # Wait for content
         try:
-            query = await self.page.locator('.bubble p:not(.interpretation)').first.inner_text()
+            await self.page.wait_for_selector('.bubble', timeout=15000)
+        except:
+            print("⚠️ No content found")
+            return "", "", "", ""
+
+        # --- Extract ---
+        try:
+            query = await self.page.locator('.bubble p').first.inner_text()
         except:
             query = ""
 
-        # Interpretation
         try:
-            interpretation = await self.page.locator('.bubble .interpretation').inner_text()
+            interpretation = await self.page.locator('.interpretation').inner_text()
         except:
             interpretation = ""
 
-        # Response
         try:
             response = await self.page.locator('[data-test-id="magi-response"]').inner_text()
         except:
             response = ""
 
-        # User Comment
         try:
             comment = await self.page.locator('.feedback-content .comment').inner_text()
         except:
@@ -169,15 +135,14 @@ async def main():
         context = await browser.new_context(storage_state="session.json")
         page = await context.new_page()
 
-        scraper = TaskyScraper(page)
-
         print("🌐 Opening task list...")
         await page.goto(TASK_LIST_URL, timeout=60000)
+        await page.wait_for_load_state("domcontentloaded")
+        await asyncio.sleep(5)
 
-        # 🔥 Wait properly for page load
-        await page.wait_for_timeout(5000)
+        scraper = TaskyScraper(page)
 
-        # ================= DEBUG START =================
+        # ✅ GET URLS
         review_urls = await scraper.get_all_task_urls()
 
         print(f"DEBUG: Found URLs = {len(review_urls)}")
@@ -185,22 +150,20 @@ async def main():
         if not review_urls:
             print("❌ No tasks found - possible login/session issue")
 
-            # 📸 Take screenshot for debugging
+            # 🔥 Debug screenshot
             await page.screenshot(path="debug.png")
 
             await browser.close()
             return
-        # ================= DEBUG END =================
 
-        print(f"\n📊 Extracting {len(review_urls)} tasks...\n")
-
+        # ✅ EXTRACT
         all_rows = []
 
-        for idx, url in enumerate(review_urls[:MAX_TASKS], 1):
+        for idx, url in enumerate(review_urls, 1):
             try:
                 query, interpretation, response, comment = await scraper.extract_task_data(url)
 
-                print(f"{idx}/{MAX_TASKS} ✅")
+                print(f"{idx}/{len(review_urls)} ✅ Extracted")
 
                 all_rows.append([
                     url,
@@ -211,16 +174,13 @@ async def main():
                 ])
 
             except Exception as e:
-                print(f"❌ Error on {url}: {e}")
+                print(f"❌ Error: {e}")
                 all_rows.append([url, "ERROR", "ERROR", "ERROR", "ERROR"])
 
-        # Upload data
-        if all_rows:
-            safe_append_rows(sheet, all_rows)
-            print(f"\n✅ Uploaded {len(all_rows)} rows to Google Sheets!")
-        else:
-            print("⚠️ No data to upload")
+        # ✅ UPLOAD
+        safe_append_rows(sheet, all_rows)
 
+        print("\n🎉 DONE")
         await browser.close()
 
 
