@@ -19,14 +19,31 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          playwright install
+          playwright install chromium
 
-      # ✅ Restore session.json from secret
+      # ✅ Restore session.json
       - name: Restore session
         run: |
           echo "${{ secrets.SESSION_JSON }}" | base64 -d > session.json
 
+      # 🔍 Debug: confirm session file exists
+      - name: Check session file
+        run: |
+          ls -lah
+          echo "Session file size:"
+          wc -c session.json || echo "session.json missing"
+
+      # 🚀 Run scraper
       - name: Run scraper
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
         run: python scraper.py
+
+      # 📸 Upload debug screenshot (if created)
+      - name: Upload debug screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: debug.png
+          if-no-files-found: ignore
